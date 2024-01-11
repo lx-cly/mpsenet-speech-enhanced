@@ -122,9 +122,9 @@ def inference(input_noisy, output_dir, checkpoint_file, json_config, segment_siz
 
 # use command: python interface.py --input_noisy {path} --output_dir {path} 
 
-def run(input_noisy ='/sda1/lanxin/MP-SENet-main/VoiceBank_DEMAND/examples/speech_with_noise.wav', output_dir='generated_files'):
+def run(input_noisy ='/sda1/lanxin/MP-SENet-main/VoiceBank_DEMAND/examples/speech_with_noise.wav', output_dir='generated_files',segment_size = 200000):
     print('Initializing Inference Process..')
-    segment_size = 200000
+    #segment_size = 200000
     checkpoint_file = "/sda1/lanxin/MP-SENet-main/weights/mpsenet" #fix model path
     config_file = os.path.join(os.path.split(checkpoint_file)[0], 'config.json')
     with open(config_file) as f:
