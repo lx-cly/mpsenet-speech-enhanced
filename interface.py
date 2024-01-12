@@ -122,10 +122,9 @@ def inference(input_noisy, output_dir, checkpoint_file, json_config, segment_siz
 
 # use command: python interface.py --input_noisy {path} --output_dir {path} 
 
-def run(input_noisy ='/sda1/lanxin/MP-SENet-main/VoiceBank_DEMAND/examples/speech_with_noise.wav', output_dir='generated_files',segment_size = 200000):
+def run(input_noisy ='examples/speech_with_noise.wav', output_dir='generated_files',segment_size = 200000):
     print('Initializing Inference Process..')
-    #segment_size = 200000
-    checkpoint_file = "/sda1/lanxin/MP-SENet-main/weights/mpsenet" #fix model path
+    checkpoint_file = "weights/mpsenet" #fix model path
     config_file = os.path.join(os.path.split(checkpoint_file)[0], 'config.json')
     with open(config_file) as f:
         data = f.read()
@@ -137,10 +136,10 @@ def run(input_noisy ='/sda1/lanxin/MP-SENet-main/VoiceBank_DEMAND/examples/speec
     
 
 if __name__ == '__main__':
-# use command: python -m multiprocessing interface.py --input_noisy {path} --output_dir {path} 
+# use command: python interface.py --input_noisy {path} --output_dir {path} 
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input_noisy', default='/sda1/lanxin/MP-SENet-main/VoiceBank_DEMAND/examples/speech_with_noise.wav')
+    parser.add_argument('--input_noisy', default='examples/speech_with_noise.wav')
     parser.add_argument('--output_dir', default='generated_files')
     args = parser.parse_args()
     run(args.input_noisy, args.output_dir)

@@ -12,7 +12,10 @@
   ```
 ## Datasets
 We use the [ICASSP_2021_DNS_Challenge dataset](https://modelscope.cn/datasets/modelscope/ICASSP_2021_DNS_Challenge/summary) for training and testing.
-
+Then,run the following command to split the training set and validation set.
+```
+python ICASSP_2021_DNS_Challenge/get_dataset.py
+```
 ## Training
 ```
 CUDA_VISIBLE_DEVICES=0,1 python train.py --config config.json

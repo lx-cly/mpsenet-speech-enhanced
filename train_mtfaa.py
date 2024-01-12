@@ -12,9 +12,11 @@ import torch.multiprocessing as mp
 from torch.distributed import init_process_group
 from torch.nn.parallel import DistributedDataParallel
 from env import AttrDict, build_env
-from datasets.dataset import Dataset, mag_pha_stft, mag_pha_istft, get_dataset_filelist
-from models.generator import MPNet, pesq_score, phase_losses
-from models.discriminator import MetricDiscriminator, batch_pesq
+# from datasets.dataset import Dataset, mag_pha_stft, mag_pha_istft, get_dataset_filelist
+from models.generator import phase_losses, pesq_score # MPNet, , 
+# from models.discriminator import MetricDiscriminator, batch_pesq
+from datasets.dataset_mtfaa import Dataset, get_dataset_filelist
+from models.mtfaa_net import MTFAANet,si_snr,mag_pha_stft
 from utils import scan_checkpoint, load_checkpoint, save_checkpoint
 
 torch.backends.cudnn.benchmark = True
@@ -28,8 +30,7 @@ def train(rank, a, h):
     torch.cuda.manual_seed(h.seed)
     device = torch.device('cuda:{:d}'.format(rank))
 
-    generator = MPNet(h).to(device)
-    discriminator = MetricDiscriminator().to(device)
+    generator = MTFAANet(n_sig=1).to(device)
 
     if rank == 0:
         print(generator)
@@ -54,23 +55,22 @@ def train(rank, a, h):
         state_dict_g = load_checkpoint(cp_g, device)
         state_dict_do = load_checkpoint(cp_do, device)
         generator.load_state_dict(state_dict_g['generator'])
-        discriminator.load_state_dict(state_dict_do['discriminator'])
         steps = state_dict_do['steps'] + 1
         last_epoch = state_dict_do['epoch']
     
     if h.num_gpus > 1:
         generator = DistributedDataParallel(generator, device_ids=[rank]).to(device)
-        discriminator = DistributedDataParallel(discriminator, device_ids=[rank]).to(device)
+
 
     optim_g = torch.optim.AdamW(generator.parameters(), h.learning_rate, betas=[h.adam_b1, h.adam_b2])
-    optim_d = torch.optim.AdamW(discriminator.parameters(), h.learning_rate, betas=[h.adam_b1, h.adam_b2])
+
 
     if state_dict_do is not None:
         optim_g.load_state_dict(state_dict_do['optim_g'])
-        optim_d.load_state_dict(state_dict_do['optim_d'])
+
 
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=h.lr_decay, last_epoch=last_epoch)
-    scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=h.lr_decay, last_epoch=last_epoch)
+
 
     training_indexes, validation_indexes, training_indexes_clean, validation_indexes_clean = get_dataset_filelist(a)
 
@@ -99,7 +99,7 @@ def train(rank, a, h):
         sw = SummaryWriter(os.path.join(a.checkpoint_path, 'logs'))
 
     generator.train()
-    discriminator.train()
+    #discriminator.train()
 
     for epoch in range(max(0, last_epoch), a.training_epochs):
         torch.cuda.empty_cache()
@@ -114,52 +114,17 @@ def train(rank, a, h):
 
             if rank == 0:
                 start_b = time.time()
-            clean_audio, clean_mag, clean_pha, clean_com, noisy_mag, noisy_pha = batch # [B, 1, F, T], F = nfft // 2+ 1, T = nframes
+            #clean_audio, clean_mag, clean_pha, clean_com, noisy_mag, noisy_pha = batch # [B, 1, F, T], F = nfft // 2+ 1, T = nframes
+            clean_audio, noisy_audio = batch # [B, 1, F, T], F = nfft // 2+ 1, T = nframes
             clean_audio = torch.autograd.Variable(clean_audio.to(device, non_blocking=True))
+            noisy_audio = torch.autograd.Variable(noisy_audio.to(device, non_blocking=True))
+            clean_mag, clean_pha, _ = mag_pha_stft(clean_audio)
             clean_mag = torch.autograd.Variable(clean_mag.to(device, non_blocking=True))
             clean_pha = torch.autograd.Variable(clean_pha.to(device, non_blocking=True))
-            clean_com = torch.autograd.Variable(clean_com.to(device, non_blocking=True))
-            noisy_mag = torch.autograd.Variable(noisy_mag.to(device, non_blocking=True))
-            noisy_pha = torch.autograd.Variable(noisy_pha.to(device, non_blocking=True))
-            one_labels = torch.ones(h.batch_size).to(device, non_blocking=True)
 
-            mag_g, pha_g, com_g = generator(noisy_mag, noisy_pha)
 
-            audio_g = mag_pha_istft(mag_g, pha_g, h.n_fft, h.hop_size, h.win_size, h.compress_factor)
-            audio_list_r, audio_list_g = list(clean_audio.cpu().numpy()), list(audio_g.detach().cpu().numpy())
-            batch_pesq_score = batch_pesq(audio_list_r, audio_list_g)
-
-            # Discriminator
-            optim_d.zero_grad()
-            metric_r = discriminator(clean_mag, clean_mag)
-            metric_g = discriminator(clean_mag, mag_g.detach())
-            loss_disc_r = F.mse_loss(one_labels, metric_r.flatten())
+            mag_g, mag_g2, pha_g, audio_g = generator([noisy_audio])
             
-            if batch_pesq_score is not None:
-                loss_disc_g = F.mse_loss(batch_pesq_score.to(device), metric_g.flatten())
-            else:
-                loss_disc_g = 0
-            
-            loss_disc_all = loss_disc_r + loss_disc_g
-            
-            loss_disc_all.backward()
-            optim_d.step()
-            
-            # Stucked in Multi-GPUs
-            # if batch_pesq_score is not None:
-            #     # Discriminator
-            #     optim_d.zero_grad()
-            #     metric_r = discriminator(clean_mag, clean_mag)
-            #     metric_g = discriminator(clean_mag, mag_g_hat.detach())
-            #     loss_disc_r = F.mse_loss(one_labels, metric_r.flatten())
-            #     loss_disc_g = F.mse_loss(batch_pesq_score.to(device), metric_g.flatten())
-            #     loss_disc_all = loss_disc_r + loss_disc_g
-            
-            #     loss_disc_all.backward()
-            #     optim_d.step()
-            # else:
-            #     print('PESQ is None!')
-            #     loss_disc_all = 0
 
             # Generator
             optim_g.zero_grad()
@@ -170,14 +135,15 @@ def train(rank, a, h):
             loss_ip, loss_gd, loss_iaf = phase_losses(clean_pha, pha_g, h)
             loss_pha = loss_ip + loss_gd + loss_iaf
             # L2 Complex Loss
-            loss_com = F.mse_loss(clean_com, com_g) * 2
+            loss_com = F.mse_loss(clean_mag, mag_g2) 
             # Time Loss
             loss_time = F.l1_loss(clean_audio, audio_g)
-            # Metric Loss
-            metric_g = discriminator(clean_mag, mag_g)
-            loss_metric = F.mse_loss(metric_g.flatten(), one_labels)
+            #SiSNR_loss = -si_snr(audio_g, clean_audio)#可以考虑反比例函数
+            # # Metric Loss
+            # metric_g = discriminator(clean_mag, mag_g)
+            # loss_metric = F.mse_loss(metric_g.flatten(), one_labels) + loss_com * 0.1
 
-            loss_gen_all = loss_metric * 0.05 + loss_mag * 0.9 + loss_pha * 0.3 + loss_com * 0.1 + loss_time * 0.2 #可以调权重
+            loss_gen_all = loss_mag * 0.9 + loss_pha * 0.3  + loss_com * 0.1  + loss_time * 0.2 #+ SiSNR_loss*0.05 #loss_metric * 0.05 + loss_mag * 0.9 + loss_pha * 0.3 + loss_com * 0.1 + loss_time * 0.2 #可以调权重
 
             loss_gen_all.backward()
             optim_g.step()
@@ -186,14 +152,22 @@ def train(rank, a, h):
                 # STDOUT logging
                 if steps % a.stdout_interval == 0:
                     with torch.no_grad():
-                        metric_error = F.mse_loss(metric_g.flatten(), one_labels).item()
-                        mag_error = F.mse_loss(clean_mag, mag_g).item()
-                        ip_error, gd_error, iaf_error = phase_losses(clean_pha, pha_g, h)
-                        pha_error = (loss_ip + loss_gd + loss_iaf).item()
-                        com_error = F.mse_loss(clean_com, com_g).item()
-                        time_error = F.l1_loss(clean_audio, audio_g).item()
-                    print('Steps : {:d}, Gen Loss: {:4.3f}, Disc Loss: {:4.3f}, Metric loss: {:4.3f}, Magnitude Loss : {:4.3f}, Phase Loss : {:4.3f}, Complex Loss : {:4.3f}, Time Loss : {:4.3f}, s/b : {:4.3f}'.
-                           format(steps, loss_gen_all, loss_disc_all, metric_error, mag_error, pha_error, com_error, time_error, time.time() - start_b))
+                        #metric_error = F.mse_loss(metric_g.flatten(), one_labels).item() #TODO:修改不需要重新计算
+                        # mag_error = F.mse_loss(clean_mag, mag_g).item()
+                        # ip_error, gd_error, iaf_error = phase_losses(clean_pha, pha_g, h)
+                        # pha_error = (ip_error + gd_error + iaf_error).item()
+                        # SiSNR_loss = -si_snr(audio_g, clean_audio).item()
+                        # com_error = F.mse_loss(clean_mag, mag_g2).item()
+                        # time_error = F.l1_loss(clean_audio, audio_g).item()
+                        mag_error = loss_mag.item()
+                        pha_error = loss_pha.item()
+                        #SiSNR_error = SiSNR_loss.item()
+                        com_error = loss_com.item()
+                        time_error = loss_time.item()
+                        loss_gen_error = loss_gen_all.item()
+                        
+                    print('Steps : {:d}, Gen Loss: {:4.3f},   Magnitude Loss : {:4.3f}, Phase Loss : {:4.3f}, Complex Loss : {:4.3f}, Time Loss : {:4.3f}, s/b : {:4.3f}'.
+                           format(steps, loss_gen_error, mag_error, pha_error, com_error, time_error, time.time() - start_b))
 
                 # checkpointing
                 if steps % a.checkpoint_interval == 0 and steps != 0:
@@ -202,15 +176,14 @@ def train(rank, a, h):
                                     {'generator': (generator.module if h.num_gpus > 1 else generator).state_dict()})
                     checkpoint_path = "{}/do_{:08d}".format(a.checkpoint_path, steps)
                     save_checkpoint(checkpoint_path, 
-                                    {'discriminator': (discriminator.module if h.num_gpus > 1 else discriminator).state_dict(),
-                                     'optim_g': optim_g.state_dict(), 'optim_d': optim_d.state_dict(), 'steps': steps,
+                                    {#'discriminator': (discriminator.module if h.num_gpus > 1 else discriminator).state_dict(),
+                                     'optim_g': optim_g.state_dict(),  'steps': steps,#'optim_d': optim_d.state_dict(),
                                      'epoch': epoch})
 
                 # Tensorboard summary logging
                 if steps % a.summary_interval == 0:
-                    sw.add_scalar("Training/Generator Loss", loss_gen_all, steps)
-                    sw.add_scalar("Training/Discriminator Loss", loss_disc_all, steps)
-                    sw.add_scalar("Training/Metric Loss", metric_error, steps)
+                    sw.add_scalar("Training/Generator Loss", loss_gen_error, steps)
+                    #sw.add_scalar("Training/SiSNR Loss", SiSNR_error, steps)
                     sw.add_scalar("Training/Magnitude Loss", mag_error, steps)
                     sw.add_scalar("Training/Phase Loss", pha_error, steps)
                     sw.add_scalar("Training/Complex Loss", com_error, steps)
@@ -226,22 +199,26 @@ def train(rank, a, h):
                     val_com_err_tot = 0
                     with torch.no_grad():
                         for j, batch in enumerate(validation_loader):
-                            clean_audio, clean_mag, clean_pha, clean_com, noisy_mag, noisy_pha = batch # [B, 1, F, T], F = nfft // 2+ 1, T = nframes
+                            clean_audio,noisy_audio = batch # [B, 1, F, T], F = nfft // 2+ 1, T = nframes
                             clean_audio = torch.autograd.Variable(clean_audio.to(device, non_blocking=True))
+                            noisy_audio = torch.autograd.Variable(noisy_audio.to(device, non_blocking=True))
+                            
+                            clean_mag, clean_pha, _ = mag_pha_stft(clean_audio)
+                            
                             clean_mag = torch.autograd.Variable(clean_mag.to(device, non_blocking=True))
                             clean_pha = torch.autograd.Variable(clean_pha.to(device, non_blocking=True))
-                            clean_com = torch.autograd.Variable(clean_com.to(device, non_blocking=True))
 
-                            mag_g, pha_g, com_g = generator(noisy_mag.to(device), noisy_pha.to(device))
 
-                            audio_g = mag_pha_istft(mag_g, pha_g, h.n_fft, h.hop_size, h.win_size, h.compress_factor)
+                            mag_g, mag_g2, pha_g, audio_g = generator([noisy_audio])
+ 
+
                             audios_r += torch.split(clean_audio, 1, dim=0) # [1, T] * B
                             audios_g += torch.split(audio_g, 1, dim=0)
 
                             val_mag_err_tot += F.mse_loss(clean_mag, mag_g).item()
                             val_ip_err, val_gd_err, val_iaf_err = phase_losses(clean_pha, pha_g, h)
                             val_pha_err_tot += (val_ip_err + val_gd_err + val_iaf_err).item()
-                            val_com_err_tot += F.mse_loss(clean_com, com_g).item()
+                            val_com_err_tot += F.mse_loss(clean_mag, mag_g2).item()
 
                         val_mag_err = val_mag_err_tot / (j+1)
                         val_pha_err = val_pha_err_tot / (j+1)
@@ -259,7 +236,6 @@ def train(rank, a, h):
             steps += 1
 
         scheduler_g.step()
-        scheduler_d.step()
         
         if rank == 0:
             print('Time taken for epoch {} is {} sec\n'.format(epoch + 1, int(time.time() - start)))
@@ -275,9 +251,9 @@ def main():
     parser.add_argument('--input_noisy_wavs_dir', default='ICASSP_2021_DNS_Challenge/datasets/noisy')
     parser.add_argument('--input_training_file', default='ICASSP_2021_DNS_Challenge/training.txt')
     parser.add_argument('--input_validation_file', default='ICASSP_2021_DNS_Challenge/test.txt')
-    parser.add_argument('--checkpoint_path', default='cp_mpsenet')
+    parser.add_argument('--checkpoint_path', default='cp_mtffa')
     parser.add_argument('--config', default='config.json')
-    parser.add_argument('--training_epochs', default=100, type=int)
+    parser.add_argument('--training_epochs', default=200, type=int)
     parser.add_argument('--stdout_interval', default=5, type=int)
     parser.add_argument('--checkpoint_interval', default=5000, type=int)
     parser.add_argument('--summary_interval', default=100, type=int)
