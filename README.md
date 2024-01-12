@@ -23,6 +23,12 @@ CUDA_VISIBLE_DEVICES=0,1 python train.py --config config.json
 Checkpoints and copy of the configuration file are saved in the `cp_mpsenet` directory by default.<br>
 You can change the path by adding `--checkpoint_path` option.
 
+MTffa net:
+```
+CUDA_VISIBLE_DEVICES=0,1 python train_mtffa.py --config config.json
+```
+(MTffa has not yet achieved good results and needs to be improved)
+
 ## Inference
 ```
 python inference.py --checkpoint_file [generator checkpoint file path]
